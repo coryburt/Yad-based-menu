@@ -1,0 +1,783 @@
+#! /usr/bin/env python3
+#
+"""
+    heliOS-menu
+    This is the Yad-based Utility Menu for the Linux desktop
+"""
+#
+#          .-9 9 `\
+#        =(:(::)=  ;
+#          ||||     \
+#          ||||      `-.
+#         ,\|\|         `,
+#        /                \
+#       ;                  `'---.,
+#       |                         `\
+#       ;                     /     |
+#       \                    |      /
+#        )           \  __,.--\    /
+#     .-' \,..._\     \`   .-'  .-'
+#    `-=``      `:    |   /-/-/`
+#                 `.__/
+#   ____  _  _  ____
+#  (_  _)/ )( \(  __)
+#    )(  ) __ ( ) _)
+#   (__) \_)(_/(____)
+#   ____   __   ____  ____  ____  ____  __    __  ____  _  _
+#  / ___) / _\ (  _ \(  __)(  _ \(_  _)/  \  /  \(_  _)/ )( \
+#  \___ \/    \ ) _ ( ) _)  )   /  )( (  O )(  O ) )(  ) __ (
+#  (____/\_/\_/(____/(____)(__\_) (__) \__/  \__/ (__) \_)(_/
+#   ____  ____   __   __
+#  / ___)(  __) / _\ (  )
+#  \___ \ ) _) /    \/ (_/\
+#  (____/(____)\_/\_/\____/
+#
+# -------------------------------------------------------------------------------------------------------------------------
+
+import re, sh, csv, os, notify2, threading, helios_common
+import shutil, stat, pwd, tarfile, sys
+from helios_common import GetPasswd, SendNotice, UpdateMounted
+from yad import YAD
+from collections import namedtuple, OrderedDict
+from subprocess import check_output, Popen, CalledProcessError
+from time import sleep
+from io import StringIO
+from psutil import disk_partitions
+from shutil import which
+from glob import glob
+
+Yad = YAD()
+
+# ===================================================================================================
+#   Global initialization stuff.  Yeah, bitch.  Globals.  Suck it.
+# ===================================================================================================
+
+BASE_DIR = '/usr/local/share/HeliOS-Post-Install'
+NWJS_DIR = '/usr/local/share/HeliOS-NWJS'
+NWJS_APPS_DIR = '/usr/local/share/HeliOS-NWJS-Apps'
+
+if not os.path.isdir( BASE_DIR ):
+    BASE_DIR = '/home/coryburt/workspace/devel'
+    NWJS_DIR = '/home/coryburt/workspace/devel/nwjs'
+    NWJS_APPS_DIR = '/home/coryburt/workspace/devel/nwjs-apps'
+
+OPTIONS_LIST = 'HeliOS-Utility-Menu-Options.txt'
+PROGRAMS_LIST = 'HeliOS-Programs-List.txt'
+OPTIONS_FULL_PATH = os.path.join( BASE_DIR, OPTIONS_LIST )
+PROGRAMS_FULL_PATH = os.path.join( BASE_DIR, PROGRAMS_LIST )
+
+if os.path.isdir( NWJS_APPS_DIR ) is True:
+    NWJS_APPS_LIST = glob( os.path.join( NWJS_APPS_DIR, r'nwjs_*zip' ) )
+else:
+    NWJS_APPS_LIST = []
+
+if os.path.isdir( NWJS_DIR ):
+    NWJS_NW = os.path.join( NWJS_DIR, 'nw' )
+else:
+    NWJS_NW = None
+
+# ===================================================================================================
+
+def EthIP( requested_interface=None ):
+    import netifaces as ni
+
+    requested_addresses = []
+    available_interfaces = ni.interfaces()
+    if requested_interface in available_interfaces:
+        ni.ifaddresses( requested_interface )
+        requested_addresses.append( ni.ifaddresses( requested_interface )[2][0]['addr'] )
+    else:
+        for i in available_interfaces:
+            ni.ifaddresses( i )
+            requested_addresses.append( ni.ifaddresses( i )[2][0]['addr'] )
+
+    return( requested_addresses )
+
+# ===================================================================================================
+
+def SendNotify( message=None, header="Notice:" ):
+    if message is None:
+        return
+    notify2.init('heliOS-menu')
+    notice = notify2.Notification(header, message)
+    notice.show()
+
+# ===================================================================================================
+
+def Installed( proggie=None ):
+    if proggie is None:
+        return( None )
+    return( which( proggie ) )
+
+# ==================================================================================================
+
+def AptReset( passwd=None ):
+    if passwd is None:
+        passwd = GetPasswd()
+    if passwd is None:
+        SendNotify( "Password not given" )
+        return()
+
+    try:
+        with sh.contrib.sudo( password=passwd, _with=True ):
+            apt_restore = sh.heliOS_apt_restore()
+            result = apt_restore.exit_code
+            # Do something with return code...
+    except Exception as e:
+        SendNotify( "APT sources system reset error message:\n" + repr(e), "Error:" )
+
+# ==================================================================================================
+
+def APTonCD_Active():
+    apt_search = re.compile( r"file:.*APTonCD" )
+    if os.path.isfile( '/etc/apt/sources.list' ):
+        with open( '/etc/apt/sources.list', 'rt' ) as fh:
+            for line in fh:
+                 if apt_search.search( line ):
+                    return( True )
+    return( False )
+
+# ==================================================================================================
+
+def Activate_APTonCD( passwd=None ):
+    if passwd is None:
+        passwd = GetPasswd()
+    if passwd is None:
+        SendNotify( "Password not given" )
+        return( None )
+
+    try:
+        with sh.contrib.sudo( password=passwd, _with=True ):
+            apt_set = sh.heliOS_apt_to_cd()
+            result = apt_set.exit_code
+            # Do something with return code...
+    except Exception as e:
+        SendNotify( "APT sources adjustment error message:\n" + repr(e), "Error:" )
+
+    return( None )
+
+# ==================================================================================================
+
+def Deactivate_APTonCD( passwd=None ):
+    if APTonCD_Active():
+        if passwd is None:
+            passwd = GetPasswd()
+        if passwd is None:
+            SendNotify( "Password not given" )
+            return( None )
+
+        try:
+            with sh.contrib.sudo( password=passwd, _with=True ):
+                apt_set = sh.heliOS_apt_reset()
+                result = apt_set.exit_code
+            if result > 0:
+                return( None )
+            
+        except Exception as e:
+            SendNotify( "APT sources adjustment\n" + repr(e), "Error:" )
+
+    else:
+        SendNotify( "APT sources are not currently pointing at an APTonCD respository" )
+
+    return( passwd )
+
+# ==================================================================================================
+
+def FirstAvailable( *progs, show_error=False ):
+    err_list = []
+    full_path = ""
+    chosen = ""
+
+    if len(progs) == 0:
+        return( chosen, full_path )
+
+    for proggie in progs:
+        print( "Proggie = " + proggie )
+        try:
+            full_path = which( proggie )
+            chosen = proggie
+            break
+        except:
+            err_list.append(proggie)
+
+    if len(err_list) > 0 and full_path == "" and show_error == True:
+        General_TextInfo_NoBlanks(
+              "No executable found for: \"" + ', '.join(err_list) + "\""
+            , "ERROR" )
+
+    return( chosen, full_path.rstrip('\n') )
+
+# ==================================================================================================
+
+def FileDialog( name_regx=None ):
+    if name_regx is not None:
+        package_regx = re.compile( name_regx )
+        window_title = 'Select a file matching: ' + name_regx
+    else:
+        package_regx = None
+        window_title = 'Select a file'
+
+    # package_regx = re.compile('helios-update.*\.deb')
+
+    x = Yad.File(   quoted=True,
+                    title=window_title,
+                    geometry="650x580+700+250"  )
+
+    if x is not None:
+        for full_name in x:
+            if package_regx is not None:
+                fname = os.path.basename( full_name )
+                if package_regx.fullmatch( fname ) is not None:
+                    return( full_name )
+            else:
+                return( full_name )
+    return( None )
+
+# ==================================================================================================
+
+def Editfile():
+    editor_str, full_path = FirstAvailable( 'gedit', 'pluma', 'geany', 'xed', show_error=True )
+    filename = Yad.File(
+                        quoted=True, preview=True,
+                        width="800", height="600", center=True,
+                        title="Choose a file to edit",
+                        button1="Cancel:1"   )
+
+    if filename is not None:
+        try:
+            Popen( [ full_path, filename[0] ] ).pid
+        except Exception as e:
+            SendNotify( "running available editor:\n" + repr(e), "Error:" )
+
+# ==================================================================================================
+
+def CliCompanion():
+    try:
+        sh.clicompanion("", _bg=True)
+    except Exception as e:
+        SendNotify( "running CLI Companion Terminal:\n" + repr(e), "Error:" )
+
+    sleep(1)
+
+# ==================================================================================================
+
+def HelpieHelperton():
+    ok = threading.Event()
+    ok.clear()
+
+    def Done(c,s,e):
+        ok.set()
+
+    bottle_server = sh.Command( 'heliOS-help-server' )
+    try:
+        bs = bottle_server( _bg=True, _tty_in=True )
+        try:
+            sleep( 1 )
+            sh.surf( 'localhost:13980/help', _done=Done )
+            ok.wait()
+        except Exception as e:
+            SendNotify( "Failed to run the GUI for the Help System\n" + repr(e), "Error:" )
+        finally:
+            sh.kill( '-2', bs.pid )
+    except Exception as e:
+        SendNotify( "Failed to run the Bottle Server for the Help System\n" + repr(e), "Error:" )
+
+# ==================================================================================================
+
+def AnalystActivityBlog():
+    passwd = GetPasswd()
+    if passwd is None:
+        return
+
+    with sh.contrib.sudo( password=passwd, _with=True ):
+        try:
+            sh.startmongo4aal( _bg=True )
+        except Exception as e:
+            SendNotify( "Failed to start MongoDB\n" + repr(e), "Error:" )
+            return
+
+    ok = threading.Event()
+    ok.clear()
+
+    def Done(c,s,e):
+        ok.set()
+
+    blog_server = sh.Command( '/opt/aal/aalblog.py' )
+    with sh.contrib.sudo( password=passwd, _with=True ):
+        try:
+            aal = blog_server( _bg=True, _tty_in=True )
+            try:
+                sleep( 1 )
+                sh.firefox( '-no-remote', 'localhost:5204', _done=Done )
+                ok.wait()
+            except Exception as e:
+                SendNotify( "Failed to run the browser for the AAL\n" + repr(e), "Error:" )
+            finally:
+                sh.kill( '-2', aal.pid )
+        except Exception as e:
+            SendNotify( "Failed to run the AAL Server\n" + repr(e), "Error:" )
+
+# ==================================================================================================
+
+def ShowManifest():
+    output = StringIO()
+    try:
+        sh.cat( '/usr/local/share/HeliOS-Post-Install/HeliOS-Manifest.txt', _out=output )
+    except Exception as e:
+        SendNotify( "showing HeliOS Manifest:\n" + repr(e), "Error:" )
+        return(None)
+
+    General_TextInfo( output.getvalue(), 'View the HeliOS Manifest/README' )
+
+# ==================================================================================================
+
+def SimplePing():
+    target = Yad.Entry(
+                        label="Enter an IP address or DNS name : ",
+                        text="",
+                        title="Simple ICMP Ping",
+                        geometry="550x120+400+150",
+                        button0="Proceed:0",
+                        button1="Cancel:1"
+    )
+
+    if target is not None:
+        cmd = "ping -c 6 -w 10 " + target
+        sts = GeneralTerm( cmd )
+        return(sts)
+
+# ==================================================================================================
+
+def SystemUpdater():
+    sts = GeneralTerm(
+          'sudo /usr/local/bin/heliOS-system-upgrade'
+        , 'Run Full System Upgrade'
+    )
+
+    return(sts)
+
+# ==================================================================================================
+
+def InstallLocalUpdate():
+    fname = FileDialog( 'helios-update.*\.deb' )
+    if fname is not None:
+        sts = GeneralTerm(
+              'sudo /usr/local/bin/heliOS-updater --package ' + fname
+            , "Install Local Update" )
+        return(sts)
+    else:
+        SendNotify( 'Local update abandoned -- no package selected', 'Warning' )
+
+# ==================================================================================================
+
+def ImportVM():
+    sts = GeneralTerm(
+          '/usr/local/bin/heliOS-VM-installer'
+        , 'Import a VM image into VirtualBox'
+    )
+    return( sts )
+
+# ==================================================================================================
+
+def Tree():
+    dir = os.getcwd()
+    proggie = ['tree']
+    form_fields = (
+        ("DIR", "Select A Directory To View : ", dir),
+        ("CHK", "Include Files?", "FALSE"),
+        ("CHK", "List the first two levels of directories only?", "TRUE")
+    )
+
+    answers = Yad.Form( fields=form_fields,
+                        geometry="320x120+400+350",
+                        title="Setup Your \"tree\" View",
+                        button0="Proceed:0",
+                        button1="Cancel:1"   )
+
+    if answers is None:
+        return
+
+    if answers[1] == 'FALSE':
+        proggie.append('-d')
+
+    if answers[2] == 'TRUE':
+        proggie += ['-L', '2', '-R']
+
+    proggie.append( answers[0] )
+
+    # print( proggie )
+
+    raw_output = check_output( proggie, universal_newlines=True )
+    General_TextInfo(raw_output, answers[0])
+    return
+
+# ==================================================================================================
+
+def LocalUpdateListing():
+    proggie = ['tree', '-d', '-L', '2', '-R', '/usr/local/share/HeliOS-Update' ]
+    raw_output = check_output( proggie, universal_newlines=True )
+    General_TextInfo( raw_output, 'Local Update Directories (Implying Updates That Have Already Been Applied)' )
+    return
+
+# ==================================================================================================
+
+def InstallMariaDB():
+    sts = GeneralTerm(
+          'sudo /usr/local/bin/heliOS-personality mariadb-server'
+        , "Install MariaDB" )
+    return(sts)
+
+# ==================================================================================================
+
+def InstallPostgres():
+    sts = GeneralTerm(
+          'sudo /usr/local/bin/heliOS-personality postgresql-9.3 pgadmin3'
+        , "Install PostgreSQL" )
+    return(sts)
+
+# ==================================================================================================
+
+def InstallApache():
+    sts = GeneralTerm(
+          'sudo /usr/local/bin/heliOS-personality apache2'
+        , "Install Apache" )
+    return(sts)
+
+# ==================================================================================================
+
+def InstallSSH():
+    sts = GeneralTerm(
+          'sudo /usr/local/bin/heliOS-personality openssh-server'
+        , "Install OpenSSH Server and Client" )
+    return(sts)
+
+# ==================================================================================================
+
+def ManPage(prog=None, title=None):
+    user_prog = prog
+    if prog is None:
+        prog_list = []
+        progs = ''
+        if os.path.isfile( PROGRAMS_FULL_PATH ):
+            with open( PROGRAMS_FULL_PATH, 'rt' ) as fh:
+                progs = fh.read()
+        elif os.path.isfile( PROGRAMS_LIST ):
+            with open( PROGRAMS_LIST, 'rt' ) as fh:
+                progs = fh.read()
+
+        prog_list = [ f for f in progs.splitlines() if not f.startswith('#') ]
+
+        user_prog = Yad.Entry( label="Enter Your Command : ",
+                            text="",
+                            data=prog_list,
+                            editable=True, width="600", center=True,
+                            title="Display the MAN page for a command or program",
+                            button0="Proceed:0",
+                            button1="Cancel:1"   )
+        if user_prog is None:
+            return
+
+    if title is None:
+        title = "MAN page for " + user_prog
+
+    proggie = ['man', '-P', 'cat', user_prog]
+
+    try:
+        raw_output = check_output( proggie, universal_newlines=True )
+    except Exception as e:
+        raw_output = " Error: \"" + user_prog + "\" -- " + repr(e)
+    General_TextInfo(raw_output, title)
+    return
+
+# ==================================================================================================
+
+def GeneralTerm(cmd=None, title=None, pause=True):
+    user_cmd = cmd
+    if cmd is None:
+        user_cmd = Yad.Entry( label="Enter Your Command : ",
+                            text="",
+                            geometry="600x120+400+150",
+                            title="Run A Command in a Terminal",
+                            button0="Proceed:0",
+                            button1="Cancel:1"   )
+        if user_cmd is None:
+            return
+
+    if title is None:
+        title = user_cmd
+
+    if pause is True:
+        bash_line = "bash -c '" + user_cmd + " ; press-any-key'"
+    else:
+        bash_line = "bash -c '" + user_cmd + "'"
+
+    proggie = [ 'xterm', '-geometry', '132x20+20+20',
+                '-title', title, '+cm', '+dc',
+                '-e', bash_line]
+    try:
+        sts = check_output( proggie, universal_newlines=True )
+    except Exception as e:
+        SendNotify( "running \"" + proggie + "\" -- " + repr(e), "Error:" )
+    return(sts)
+
+# ==================================================================================================
+
+def DetachedTerm(cmd=None, title=None):
+    user_cmd = cmd
+    if cmd is None:
+        user_cmd = Yad.Entry( label="Enter Your Command : ",
+                            text="",
+                            geometry="600x120+400+150",
+                            title="Run A Command in a Terminal",
+                            button0="Proceed:0",
+                            button1="Cancel:1"   )
+        if user_cmd is None:
+            return
+
+    if title is None:
+        title = user_cmd
+
+    bash_line = "bash -c '" + user_cmd + "'"
+
+    try:
+        sh.xterm('-geometry', '132x20+20+20', '-title', title, '+cm', '+dc', '-e', bash_line, _bg=True)
+    except Exception as e:
+        SendNotify( "running \"" + user_cmd + "\" -- " + repr(e), "Error:" )
+
+    sleep(1)
+
+# ==================================================================================================
+
+def General_TextInfo(raw_input, title):
+    output = "\n".join([ll.rstrip() for ll in raw_input.splitlines()])
+    line_cnt = output.count('\n')
+    win_height = str( min( 900, (line_cnt * 13) + 180 ) )
+    x = Yad.TextInfo(   listen=True, tail=True,
+                        font=['Liberation Mono', 'Regular', '10'],
+                        height=win_height, width="1100", center=True,
+                        button0="Dismiss:0",
+                        title="Listing of " + title  )
+    x(output)
+
+# ==================================================================================================
+
+def General_TextInfo_NoBlanks(raw_input, title):
+    output = "\n".join([ll.rstrip() for ll in raw_input.splitlines() if ll.strip()])
+    line_cnt = output.count('\n')
+    win_height = str( min( 900, (line_cnt * 13) + 180 ) )
+    x = Yad.TextInfo(   listen=True, tail=True,
+                        font=['Liberation Mono', 'Regular', '10'],
+                        height=win_height, width="1100", center=True,
+                        button0="Dismiss:0",
+                        title="Listing of " + title  )
+    x(output)
+
+# ==================================================================================================
+# ==================================================================================================
+
+def ExternalOption( fname=None ):
+    if fname is None:
+        return
+
+    extern_file = os.path.join( BASE_DIR, fname )
+
+    if not os.path.isfile( extern_file ):
+        extern_file = fname
+
+    if not os.path.isfile( extern_file ):
+        SendNotify( "code file for this external option was not found", "Error:" )
+        return
+
+    try:
+        with open( extern_file, 'rt' ) as fh:
+            extern_code = fh.read()
+    except Exception as e:
+        SendNotify( "file read -- " + repr(e), "Error:" )
+        return
+
+    try:
+        compile( extern_code, extern_file, 'exec' )
+    except Exception as e:
+        SendNotify( "compile -- " + repr(e), "Error:" )
+        return
+
+    try:
+        exec( extern_code, globals() )
+    except Exception as e:
+        SendNotify( "running the code -- " + repr(e), "Error:" )
+        return
+
+# ==================================================================================================
+
+def NWjsOption( fname=None ):
+    if fname is None or NWJS_NW is None:
+        return
+
+    nwjs_file = os.path.join( NWJS_APPS_DIR, fname )
+
+    if not nwjs_file in NWJS_APPS_LIST:
+        SendNotify( 'Requested application not implemented', 'Warning:' )
+        return
+
+    nw = sh.Command( NWJS_NW )
+    nw( nwjs_file, _bg=True, _tty_in=True )
+    SendNotice( 'starting {} ...'.format( fname ), 'Notice:' )
+
+# ==================================================================================================
+# =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+# ==================================================================================================
+
+def APTonCDMenu():
+    result = Yad.List( colnames=(   ('Func', 'HD'),('Description', 'TEXT'), ('OptionID', 'HD')),
+                                    data=BuildMenuList('04'),
+                                    title="HeliOS Options For APTonCD Repository",
+                                    geometry="450x320+600+250",
+                                    borders="10",
+                                    button="Return To The Main Menu:1" )
+    if result is not None:
+        if result[0].startswith('extern_'):
+            ExternalOption( result[0] )
+        else:
+            globals()[result[0]]()
+    return( True )
+
+# ==================================================================================================
+
+def ApplicationsMenu():
+    result = Yad.List( colnames=(   ('Func', 'HD'),('Description', 'TEXT'), ('OptionID', 'HD')),
+                                    data=BuildMenuList('03'),
+                                    title="HeliOS Applications Menu",
+                                    geometry="450x380+600+150",
+                                    borders="10",
+                                    button="Return To The Main Menu:1" )
+    if result is not None:
+        if result[0].startswith('extern_'):
+            ExternalOption( result[0] )
+        elif result[0].startswith('nwjs_'):
+            NWjsOption( result[0] )
+        else:
+            globals()[result[0]]()
+    return( True )
+
+# ==================================================================================================
+
+def SystemsMenu():
+    result = Yad.List( colnames=(   ('Func', 'HD'),('Description', 'TEXT'), ('OptionID', 'HD')),
+                                    data=BuildMenuList('02'),
+                                    title="HeliOS System Configuration Menu",
+                                    geometry="450x380+600+150",
+                                    borders="10",
+                                    button="Return To The Main Menu:1" )
+    if result is not None:
+        if result[0].startswith('extern_'):
+            ExternalOption( result[0] )
+        else:
+            globals()[result[0]]()
+    return( True )
+
+# ==================================================================================================
+
+def MainMenu():
+    result = Yad.List( colnames=(   ('Func', 'HD'),('Description', 'TEXT'), ('OptionID', 'HD') ),
+                                    data=BuildMenuList('01'),
+                                    title="HeliOS Utility Menu",
+                                    geometry="450x240+1200+150",
+                                    borders="10",
+                                    text_align="center",
+                                    button="Dismiss This Menu:1" )
+
+    if result is not None:
+        return( ( result[0], result[2] ) )
+    return( ( None, None ) )
+
+# -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+def BuildMenuList(menu_id):
+    MenuList = []
+    options_file = ""
+
+    if os.path.isfile( OPTIONS_FULL_PATH ):
+        options_file = OPTIONS_FULL_PATH
+    elif os.path.isfile( OPTIONS_LIST ):
+        options_file = OPTIONS_LIST
+    else:
+        return( MenuList )
+
+    apt_cd_mounted = False
+    if UpdateMounted() is not None:
+        apt_cd_mounted = True
+
+    apt_cd_active = APTonCD_Active()
+
+    MenuItem = namedtuple('MenuItem', [ 'Func', 'Description', 'OptionID' ])
+
+    try:
+        with open( options_file, newline='' ) as mf:
+            data = {}
+            x = OrderedDict()
+            is_installed = re.compile( r"IsInstalled_(.*)" )
+
+            # This complicated decision-making code will:
+            #   1) Cause the "Deactivate APTonCD sources" option to be added to the menu --
+            #           -- if sources actually DO point at APTonCD --
+            #           -- it is activated regardless of whether or not the APTonCD repo is mounted,
+            #   2) Cause the "Activate APTonCD sources" option to be added to the menu --
+            #           -- if sources actually DO NOT point at APTonCD,
+            #           -- it is ONLY activated when the APTonCD repo is mounted,
+            #   3) Cause all other "APTonCD-only" options to be added to the menu -- 
+            #           -- if the APTonCD repository is actually mounted at the time.
+            #
+            #   Although the option #1 is marked as "APTonCD-only," it will be
+            #   placed on the menu regardless of whether or not the APTonCD repository is
+            #   mounted; this is because the user may need to reset APT sources to the system 
+            #   default ("deactivate") at any time -- even if the APTonCD repository has already
+            #   been unmounted.
+
+            reader = csv.DictReader( mf )
+            for row in reader:
+                if row['Menu'] == menu_id:
+                    if row['OptionID'].startswith( 'APTonCD' ):
+                        if row['OptionID'].endswith( 'Deactivate' ):
+                            if apt_cd_active:
+                                data[ row['Order'] ] = MenuItem( Func=row['Func'],
+                                                                 Description=row['Description'],
+                                                                 OptionID=row['OptionID'] )
+                        elif apt_cd_mounted:
+                            if row['OptionID'].endswith( 'Activate' ):
+                                if not apt_cd_active:
+                                    data[ row['Order'] ] = MenuItem( Func=row['Func'],
+                                                                     Description=row['Description'],
+                                                                     OptionID=row['OptionID'] )
+                            else:
+                                data[ row['Order'] ] = MenuItem( Func=row['Func'],
+                                                                 Description=row['Description'],
+                                                                 OptionID=row['OptionID'] )
+                    elif row['OptionID'].startswith( 'IsInstalled' ):
+                        prog_match = is_installed.match( row['OptionID'] )
+                        full_name = Installed( prog_match.group(1) )
+                        if full_name is not None:
+                            data[ row['Order'] ] = MenuItem( Func=row['Func'],
+                                                             Description=row['Description'],
+                                                             OptionID=row['OptionID'] )
+                    else:
+                        data[ row['Order'] ] = MenuItem( Func=row['Func'],
+                                                         Description=row['Description'],
+                                                         OptionID=row['OptionID'] )
+
+        x = OrderedDict( sorted( data.items(), key=lambda t: t[0] ) )
+        MenuList = x.values()
+    except:
+        pass
+
+    return( MenuList )
+
+# ===================================================================================================
+
+if __name__ == '__main__':
+
+    while True:
+        func_name, choice = MainMenu()
+        if choice is None:
+            break
+        else:
+            globals()[func_name]()
