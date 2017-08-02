@@ -1,0 +1,256 @@
+#! /usr/bin/env python3
+#
+"""
+   heliOS-personality
+
+   This is the script run from the utility menu to modify the "personality"
+   of the running system
+
+"""
+# ------------------------------------------------------------------------------
+#
+#          .-9 9 `\
+#        =(:(::)=  ;
+#          ||||     \
+#          ||||      `-.
+#         ,\|\|         `,
+#        /                \
+#       ;                  `'---.,
+#       |                         `\
+#       ;                     /     |
+#       \                    |      /
+#        )           \  __,.--\    /
+#     .-' \,..._\     \`   .-'  .-'
+#    `-=``      `:    |   /-/-/`
+#                 `.__/
+#   ____  _  _  ____
+#  (_  _)/ )( \(  __)
+#    )(  ) __ ( ) _)
+#   (__) \_)(_/(____)
+#   ____   __   ____  ____  ____  ____  __    __  ____  _  _
+#  / ___) / _\ (  _ \(  __)(  _ \(_  _)/  \  /  \(_  _)/ )( \
+#  \___ \/    \ ) _ ( ) _)  )   /  )( (  O )(  O ) )(  ) __ (
+#  (____/\_/\_/(____/(____)(__\_) (__) \__/  \__/ (__) \_)(_/
+#   ____  ____   __   __
+#  / ___)(  __) / _\ (  )
+#  \___ \ ) _) /    \/ (_/\
+#  (____/(____)\_/\_/\____/
+#
+# ------------------------------------------------------------------------------
+
+import argparse, re, sh, os, textwrap
+from shutil import move
+from psutil import disk_partitions
+from time import sleep
+from yad import YAD
+
+Yad = YAD()
+
+APT_EXTRAS_DIR = '/etc/apt/sources.list.d/'
+APT_OFFLINE_DIR = '/etc/apt/offline.d/'
+APT_SOURCES_ONLINE = '/etc/apt/sources.list'
+APT_SOURCES_OFFLINE = '/etc/apt/offline.d/sources.list'
+
+# ===================================================================================================
+
+def Warning( message=None, header="Notice:" ):
+    if message is None:
+        return
+
+    print( "-------------------------------------------------------------------------")
+    print( header + " " + message )
+    print( "-------------------------------------------------------------------------")
+
+# ===================================================================================================
+
+def NoticeFormat(raw_input):
+    bubble = raw_input.splitlines()
+    cnt = len(bubble)
+    width = 0
+    for ll in bubble:
+        width = max( width, len(ll) )
+    width = width + 10
+
+    format_str = '{:^' + str( width ) + '}'
+    output = ['  ']
+    for ll in bubble:
+        output.append( format_str.format(ll) )
+
+    window_width = width * 11
+
+    return( "\n".join( output ), cnt, window_width )
+
+# ==================================================================================================
+
+def SendNotice( message=None, header='Notice:' ):
+    if message is None:
+        return
+
+    output, line_cnt, win_width = NoticeFormat( header + ' ' + message )
+    win_height = str( (line_cnt * 13) + 60 )
+    time_out = max( 3, line_cnt )
+    x = Yad.TextInfo( 
+                        listen=True, tail=True,
+                        font=['Liberation Mono', 'Regular', '12'],
+                        height=win_height, width=win_width, center=True,
+                        skip_taskbar=True, on_top=True, fore='#0F482E', back='#FFFACD',
+                        no_buttons=True, timeout=time_out, undecorated=True )
+    x( output )
+
+# ==================================================================================================
+
+def SendError( message=None, header='Error:' ):
+    if message is None:
+        return
+
+    output, line_cnt, win_width = NoticeFormat( header + ' ' + message )
+    win_height = str( (line_cnt * 13) + 60 )
+    time_out = max( 3, line_cnt )
+    x = Yad.TextInfo( 
+                        listen=True, tail=True,
+                        font=['Liberation Mono', 'Regular', '12'],
+                        height=win_height, width=win_width, center=True,
+                        skip_taskbar=True, on_top=True, fore='#961D1D', back='#FFFACD',
+                        no_buttons=True, timeout=time_out, undecorated=True )
+    x( output )
+
+# ===================================================================================================
+
+def Die( message="Update Installer Script Terminated", header=None ):
+    SendError( message, header )
+    sleep( 2 )
+    raise SystemExit(1)
+
+# ===================================================================================================
+
+def AptSourceReplace( new_source=None ):
+    if new_source is None:
+        return( [False, "No APTonCD source repository specified", 'Notice:'] )
+
+    if os.path.isfile( APT_SOURCES_ONLINE ):
+        if os.path.isfile( APT_SOURCES_OFFLINE ):
+            os.remove( APT_SOURCES_OFFLINE )
+        try:
+            move( APT_SOURCES_ONLINE, APT_SOURCES_OFFLINE )
+        except Exception as e:
+            return( [False, "Unable to move the APT sources.list off-line: " + repr(e), 'Error:'] )
+
+    err_msg = []
+    for i in os.listdir( APT_EXTRAS_DIR ):
+        online_version = os.path.join( APT_EXTRAS_DIR, i )
+        offline_version = os.path.join( APT_OFFLINE_DIR, i )
+        if not os.path.isdir( online_version ):
+            if os.path.isfile( offline_version ):
+                os.remove( offline_version )
+            try:
+                move( online_version, offline_version )
+            except Exception as e:
+                err_msg.append( repr(e) )
+
+    if len( err_msg ) > 0:
+        return( [False, 'Unable to relocate APT sources off-line: ' + ', '.join( err_msg ), 'Error:'] )
+
+    try:
+        with open( APT_SOURCES_ONLINE, 'wt') as fh:
+            fh.write( "deb file:" + new_source + "/ /" + "\n" )
+    except Exception as e:
+        return( [False, "Unable to point APT sources.list to \"" + new_source + "\" -- " + repr(e), 'Error:'] )
+
+    return( [True, 'APT sources prepared for update OK', 'OK:'] )
+
+# ===================================================================================================
+
+def AptSourceRestore():
+    if os.path.isfile( APT_SOURCES_OFFLINE ):
+        if os.path.isfile( APT_SOURCES_ONLINE ):
+            os.remove( APT_SOURCES_ONLINE )
+        try:
+            move( APT_SOURCES_OFFLINE, APT_SOURCES_ONLINE )
+        except Exception as e:
+            return( [False, "Unable to restore the APT sources.list file: " + repr(e), 'Error:'] )
+
+    err_msg = []
+    for i in os.listdir( APT_OFFLINE_DIR ):
+        offline_file = os.path.join( APT_OFFLINE_DIR, i )
+        online_file = os.path.join( APT_EXTRAS_DIR, i )
+        if not os.path.isdir( offline_file ):
+            if os.path.isfile( online_file ):
+                os.remove( online_file )
+            try:
+                move( offline_file, online_file )
+            except Exception as e:
+                err_msg.append( repr(e) )
+
+    if len(err_msg) > 0:
+        return( [False, 'Unable to restore all of the off-line APT sources: ' + ', '.join( err_msg ), 'Error:'] )
+
+    return( [True, 'APT sources restored OK', 'OK:'] )
+
+# ===================================================================================================
+
+def UpdateMounted():
+
+    partitions = disk_partitions(all=False)
+
+    apt_mount_point = None
+    apt_pattern = re.compile(r"(.*APT.*)")
+    for p in partitions:
+         match = apt_pattern.match(p.mountpoint)
+         if match is not None:
+            apt_mount_point = match.group(1)
+            break
+    return( apt_mount_point )
+
+# ===================================================================================================
+
+if __name__ == '__main__':
+
+    if os.geteuid() != 0:
+        print( "ABEND: Elevated privileges required..." )
+        Die( "Personality update aborted" )
+
+    parser = argparse.ArgumentParser(
+                prog='heliOS-update-personality',
+                formatter_class=argparse.RawDescriptionHelpFormatter,
+                description=textwrap.dedent('''\
+                    HeliOS Speciality Systems Installation
+                    ---------------------------------------
+                    ''')
+    )
+
+    parser.add_argument('PACKAGE', nargs='+', help='Package found in the HeliOS Update CD repository')
+    args = parser.parse_args()
+    # package_arg_list = ", ".join( '"{0}"'.format(p) for p in args.PACKAGE )
+    package_arg_list = ", ".join( args.PACKAGE )
+
+    msg = 'Installation complete'
+    lead = 'OK:'
+    replace_ok, bubble, replace_lead = AptSourceReplace( UpdateMounted() )
+    ok = replace_ok
+
+    if replace_ok:
+        try:
+            sh.apt_get( "update", _fg=True )
+        except Exception as e:
+            msg = "Unable to execute APT update: " + repr(e)
+            lead = 'Error:'
+            ok = False
+    else:
+        msg = bubble
+        lead = replace_lead
+
+    if ok:
+        try:
+            sh.apt_get( "install", "-y", "--allow-unauthenticated", package_arg_list, _fg=True )
+        except sh.ErrorReturnCode:
+            msg = "Unable to complete the APT package installation..."
+            lead = 'Error:'
+
+    if replace_ok:
+        ok, bubble, restore_lead = AptSourceRestore()
+        msg = msg + '\n' + bubble
+        if not ok:
+            lead = restore_lead
+
+    Warning( msg, lead )
+    SendNotice( msg, lead )            
