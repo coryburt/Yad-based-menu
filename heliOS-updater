@@ -1,0 +1,235 @@
+#! /usr/bin/env python3
+#
+"""
+    heliOS-updater
+
+    This script is called by the Utility Menu; it carries out the update process.
+    It looks for the mount-point of an update disc, then invokes "dpkg -i" to install
+    the "HeliOS-Update.deb" package that MUST be included in the disc's repository.
+
+    Then, it checks the staging area for the results of the "apt" installation of
+    the "HeliOS-Update.deb" package; it then:
+        1. reads the VERSION file that MUST be installed by that package,
+        2. creates an install directory for the material in the staging area,
+        3. moves all material from the staging area into this install directory,
+        4. carries out the update completion instructions contained in the INSTALL file.
+
+"""
+# ======================================================================================
+#
+#          .-9 9 `\
+#        =(:(::)=  ;
+#          ||||     \
+#          ||||      `-.
+#         ,\|\|         `,
+#        /                \
+#       ;                  `'---.,
+#       |                         `\
+#       ;                     /     |
+#       \                    |      /
+#        )           \  __,.--\    /
+#     .-' \,..._\     \`   .-'  .-'
+#    `-=``      `:    |   /-/-/`
+#                 `.__/
+#   ____  _  _  ____
+#  (_  _)/ )( \(  __)
+#    )(  ) __ ( ) _)
+#   (__) \_)(_/(____)
+#   ____   __   ____  ____  ____  ____  __    __  ____  _  _
+#  / ___) / _\ (  _ \(  __)(  _ \(_  _)/  \  /  \(_  _)/ )( \
+#  \___ \/    \ ) _ ( ) _)  )   /  )( (  O )(  O ) )(  ) __ (
+#  (____/\_/\_/(____/(____)(__\_) (__) \__/  \__/ (__) \_)(_/
+#   ____  ____   __   __
+#  / ___)(  __) / _\ (  )
+#  \___ \ ) _) /    \/ (_/\
+#  (____/(____)\_/\_/\____/
+#
+# -------------------------------------------------------------------------------------------------------------------------
+
+import os, sh, argparse, io, helios_common
+import pwd, shutil, stat, tarfile, sys
+from glob import glob
+from shutil import move
+    
+BASE_UPDATE_DIR = '/usr/local/share/HeliOS-Update'
+POST_INSTALL_DIR = '/usr/local/share/HeliOS-Post-Install'
+STAGING = os.path.join( BASE_UPDATE_DIR, 'staging' )
+
+APT_DIR = '/etc/apt'
+APT_EXTRAS_DIR = '/etc/apt/sources.list.d/'
+APT_OFFLINE_DIR = '/etc/apt/offline.d/'
+APT_SOURCES_ONLINE = '/etc/apt/sources.list'
+APT_SOURCES_OFFLINE = '/etc/apt/offline.d/sources.list'
+APT_SOURCES_SAVE = '/etc/apt/sources.list.save'
+
+# ===================================================================================================
+
+def ClearStaging( f=None ):
+    try:
+        sh.rm( '-rf', STAGING + r'/*' )
+    except:
+        if f is not None:
+            helios_common.Warning( 'Unable to clear the staging area for {}'.format( f ), 'Error:' )
+        else:
+            helios_common.Warning( 'Unable to clear the staging area for the local update', 'Error:' )
+
+# ===================================================================================================
+
+def AptInstallFromCD():
+
+    apt_mnt_pnt = helios_common.UpdateMounted()
+    if apt_mnt_pnt is None:
+        helios_common.SendError( "Unable to access an APTonCD repo" )
+        return( False )
+
+    replace_worked, bubble, lead = helios_common.AptSourceReplace( apt_mnt_pnt )
+
+    if not replace_worked:
+        helios_common.SendError( bubble, lead )
+        return( False )
+
+    try:
+        sh.apt_get( "update", _fg=True )
+    except sh.ErrorReturnCode:
+        msg = "Unable to execute APT-GET update on the APTonCD repo!"
+        ok, bubble, lead = helios_common.AptSourceRestore()
+        if not ok:
+            msg += ' ' + bubble
+        helios_common.SendError( msg )
+        return( False )
+
+    cache_list = io.StringIO()
+
+    try:
+        sh.apt_cache( 'search', 'helios-update', _out=cache_list )
+    except Exception as e:
+        msg = "Error while testing for a \"helios-update\" package in the APTonCD repo: " + repr(e)
+        cache_list.close()
+        ok, bubble, lead = helios_common.AptSourceRestore()
+        if not ok:
+            msg += ' ' + bubble
+        helios_common.SendError( msg )
+        return( False )
+
+    pkgs = [ f.split()[0] for f in cache_list.getvalue().splitlines() ]
+    cache_list.close()
+
+    if len(pkgs) > 0:
+        try:
+            for f in pkgs:
+                sh.apt_get( "install", f, "--allow-unauthenticated", "--reinstall", _fg=True )
+        except Exception as e:
+            msg = "APT-install of helios-update package failed: " + repr(e)
+            ok, bubble, lead = helios_common.AptSourceRestore()
+            if not ok:
+                msg += ' ' + bubble
+            helios_common.SendError( msg )
+    else:
+        helios_common.SendNotice( 'No helios-update package was found in the APTonCD repository...' )
+        ok, bubble, lead = helios_common.AptSourceRestore()
+        if not ok:
+            helios_common.SendError( bubble, lead )
+        return( False )
+
+    return( True )
+
+# ===================================================================================================
+
+def AptInstallPackage( package=None ):
+    install_outcome = False
+
+    if package is None:
+        return( AptInstallFromCD() )
+    elif os.path.isfile( package ):
+        try:
+            ClearStaging( package )
+            sh.dpkg( '-i', '--force-overwrite', package, _fg=True )
+            install_outcome = True
+        except Exception as e:
+            helios_common.SendError( "dpkg was unable to install the package \"" + package + "\" -- " + repr(e) )
+    else:
+        helios_common.SendError( "Unable to find specified package file \"" + package + "\"" )
+
+    return( install_outcome )
+
+# ===================================================================================================
+
+def DoTheUpdate():
+    target_file = None
+    install_file = None
+    target_dir = None
+    update_dir = None
+
+    for f in glob( os.path.join( STAGING, r'TARGET*' ) ):
+        if os.path.isfile( f ):
+            target_file = f
+            break
+
+    if target_file is None:
+        # This is either a malformed update, or it is a direct-to-bin update that doesn't use this mechanism...
+        return
+
+    # Continue here if this is a "regular" update than has a target directory file (e.g. TARGET.20170120_12)...
+
+    try:
+        with open( os.path.join( STAGING, target_file ) ) as fh:
+            target_dir = fh.read().replace('\n', '')
+        update_dir = os.path.join(BASE_UPDATE_DIR, target_dir)
+    except Exception as e:
+        msg = "Malformed update -- no update target directory provided:\n" + repr(e)
+        helios_common.Warning( msg, "ABEND:" )
+        return
+
+    try:
+        os.mkdir( update_dir )
+    except FileExistsError:
+        msg = "Unable to complete -- a previous attempt to apply this update has been detected\n"
+        msg = msg + "The update directory created at that time must be removed manually to proceed\n"
+        msg = msg + "See: {}".format( BASE_UPDATE_DIR )
+        helios_common.Warning( msg, "ABEND:" )
+        return
+
+    for f in os.listdir( STAGING ):
+        src = os.path.join( STAGING, f )
+        dst = os.path.join( update_dir, f )
+        move( src, dst )
+
+    for f in glob( os.path.join( update_dir, r'INSTALL*' ) ):
+        if os.path.isfile( f ):
+            install_file = f
+            break
+
+    if os.path.isfile( install_file ):
+        try:
+            with open( install_file ) as fh:
+                install_code = fh.read()
+
+            compile( install_code, install_file, 'exec' )
+            os.chdir( update_dir )
+            exec( install_code )
+
+            msg = "HeliOS update applied successfully"
+            helios_common.SendNotice( msg )
+            msg = msg + ".\nA restart of the Utility Menu or reboot of the system"
+            msg = msg + "\nmay be required for changes to be fully applied."
+            helios_common.Warning( msg, "OK:" )
+        except Exception as e:
+            msg = "Unable to complete update\n" + repr(e)
+            helios_common.Warning( msg, "ABEND:" )
+    else:
+        msg = "No post-install script was found -- update may be incomplete"
+        helios_common.Warning( msg, "helios_common.Warning:" )
+
+# ===================================================================================================
+
+if __name__ == '__main__':
+    if os.geteuid() != 0:
+        helios_common.Warning( "Elevated privileges required..." )
+        helios_common.Die( "Program script aborted -- sudo not provided" )
+    else:
+        parser = argparse.ArgumentParser()
+        parser.add_argument( '--package', help='Install the update PACKAGE directly' )
+        args = parser.parse_args()
+        
+        if AptInstallPackage( args.package ):
+            DoTheUpdate()
